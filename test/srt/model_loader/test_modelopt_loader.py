@@ -37,9 +37,15 @@ class TestModelOptModelLoader(CustomTestCase):
         self.load_config = LoadConfig()
         self.device_config = DeviceConfig(device="cuda")
 
-        # Create a basic model config with modelopt_quant
+        # Create a basic model config with unified quantization flag
         self.model_config = ModelConfig(
-            model_path=self.model_path, modelopt_quant="fp8"
+            model_path=self.model_path,
+            modelopt_quant="fp8",  # Keep legacy for backward compatibility tests
+        )
+
+        # Also create a unified quantization config for new tests
+        self.unified_model_config = ModelConfig(
+            model_path=self.model_path, quantization="modelopt_fp8"
         )
 
         # Mock base model
@@ -157,10 +163,8 @@ class TestModelOptModelLoader(CustomTestCase):
 
                 # Verify the error message contains expected information
                 error_msg = str(context.exception)
-                self.assertIn(
-                    "Invalid modelopt_quant choice: 'invalid_quant'", error_msg
-                )
-                self.assertIn("Available choices in QUANT_CFG_CHOICES", error_msg)
+                self.assertIn("Invalid quantization choice: 'invalid_quant'", error_msg)
+                self.assertIn("Available choices:", error_msg)
 
     @patch("sglang.srt.model_loader.loader.logger")
     def test_missing_modelopt_import(self, mock_logger):
@@ -189,7 +193,7 @@ class TestModelOptModelLoader(CustomTestCase):
                 # Verify error logging
                 mock_logger.error.assert_called_with(
                     "NVIDIA Model Optimizer (modelopt) library not found. "
-                    "Please install it to use 'modelopt_quant' feature."
+                    "Please install it to use ModelOpt quantization."
                 )
 
     def test_quantization_config_attribute_validation(self):
@@ -699,6 +703,54 @@ class TestModelOptModelLoader(CustomTestCase):
                     # Verify we still get back the base model (fallback behavior)
                     self.assertEqual(result_model, self.mock_base_model)
 
+    def test_unified_quantization_flag_support(self):
+        """Test that ModelOptModelLoader supports unified quantization flags."""
+        # Test modelopt_fp8
+        config_fp8 = ModelConfig(
+            model_path=self.model_path, quantization="modelopt_fp8"
+        )
+        self.assertEqual(config_fp8._get_modelopt_quant_type(), "fp8")
+
+        # Test modelopt_fp4
+        config_fp4 = ModelConfig(
+            model_path=self.model_path, quantization="modelopt_fp4"
+        )
+        self.assertEqual(config_fp4._get_modelopt_quant_type(), "nvfp4")
+
+        # Test auto-detection
+        config_auto = ModelConfig(model_path=self.model_path, quantization="modelopt")
+        # Should default to fp8 when no config is detected
+        self.assertEqual(config_auto._get_modelopt_quant_type(), "fp8")
+
+    def test_unified_quantization_workflow_selection(self):
+        """Test that unified quantization flags trigger ModelOptModelLoader selection."""
+        from sglang.srt.model_loader.loader import get_model_loader
+
+        # Test that modelopt_fp8 triggers ModelOptModelLoader for unquantized models
+        config = ModelConfig(model_path=self.model_path, quantization="modelopt_fp8")
+
+        with patch.object(config, "_is_already_quantized", return_value=False):
+            loader = get_model_loader(self.load_config, config)
+            self.assertIsInstance(loader, ModelOptModelLoader)
+
+    def test_legacy_and_unified_compatibility(self):
+        """Test that both legacy modelopt_quant and unified quantization flags work."""
+        # Legacy approach
+        legacy_config = ModelConfig(model_path=self.model_path, modelopt_quant="fp8")
+
+        # Unified approach
+        unified_config = ModelConfig(
+            model_path=self.model_path, quantization="modelopt_fp8"
+        )
+
+        # Both should work with ModelOptModelLoader
+        legacy_loader = ModelOptModelLoader(self.load_config)
+        unified_loader = ModelOptModelLoader(self.load_config)
+
+        # Both configs should be valid for ModelOptModelLoader
+        self.assertIsNotNone(legacy_config.modelopt_quant)
+        self.assertEqual(unified_config._get_modelopt_quant_type(), "fp8")
+
 
 class TestModelOptLoaderIntegration(CustomTestCase):
     """Integration tests for ModelOptModelLoader with Engine API."""
@@ -765,7 +817,7 @@ class TestModelOptLoaderIntegration(CustomTestCase):
                 len(cfg_name) > 0, f"Config name for '{choice}' should not be empty"
             )
 
-    @patch("sglang.srt.model_loader.loader.get_model_loader")
+    @patch("sglang.srt.model_loader.get_model_loader")
     @patch("sglang.srt.entrypoints.engine.Engine.__init__")
     def test_engine_with_modelopt_quant_cli_argument(
         self, mock_engine_init, mock_get_model_loader

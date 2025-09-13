@@ -31,7 +31,7 @@ from sglang.srt.hf_transformers_utils import (
 )
 from sglang.srt.layers.quantization import QUANTIZATION_METHODS
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import get_bool_env_var, is_hip
+from sglang.srt.utils import get_bool_env_var, is_hip, is_remote_url
 from sglang.utils import is_in_ci
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,8 @@ class ModelConfig:
         modelopt_quant: Optional[Union[str, Dict]] = None,
         modelopt_checkpoint_restore_path: Optional[str] = None,
         modelopt_checkpoint_save_path: Optional[str] = None,
+        modelopt_export_path: Optional[str] = None,
+        quantize_and_serve: bool = False,
         override_config_file: Optional[str] = None,
         is_draft_model: bool = False,
         hybrid_kvcache_ratio: Optional[float] = None,
@@ -92,6 +94,14 @@ class ModelConfig:
         self.modelopt_quant = modelopt_quant
         self.modelopt_checkpoint_restore_path = modelopt_checkpoint_restore_path
         self.modelopt_checkpoint_save_path = modelopt_checkpoint_save_path
+        self.modelopt_quant = modelopt_quant
+        self.modelopt_checkpoint_restore_path = modelopt_checkpoint_restore_path
+        self.modelopt_checkpoint_save_path = modelopt_checkpoint_save_path
+        self.modelopt_export_path = modelopt_export_path
+        self.quantize_and_serve = quantize_and_serve
+
+        # Validate quantize_and_serve configuration
+        self._validate_quantize_and_serve_config()
 
         self.maybe_pull_model_tokenizer_from_remote()
         self.model_override_args = json.loads(model_override_args)
@@ -357,6 +367,10 @@ class ModelConfig:
             modelopt_quant=server_args.modelopt_quant,
             modelopt_checkpoint_restore_path=server_args.modelopt_checkpoint_restore_path,
             modelopt_checkpoint_save_path=server_args.modelopt_checkpoint_save_path,
+            modelopt_quant=server_args.modelopt_quant,
+            modelopt_checkpoint_restore_path=server_args.modelopt_checkpoint_restore_path,
+            modelopt_checkpoint_save_path=server_args.modelopt_checkpoint_save_path,
+            quantize_and_serve=server_args.quantize_and_serve,
             **kwargs,
         )
 
@@ -497,6 +511,63 @@ class ModelConfig:
         else:
             # Default to FP8 for backward compatibility
             return {"quant_method": "modelopt_fp8"}
+
+    def _is_already_quantized(self) -> bool:
+        """Check if the model is already quantized based on config files."""
+        # Check for HuggingFace quantization config
+        if is_remote_url(self.model_path):
+            try:
+                from huggingface_hub import HfApi
+
+                hf_api = HfApi()
+                return hf_api.file_exists(self.model_path, "hf_quant_config.json")
+            except Exception:
+                return False
+        else:
+            return os.path.exists(os.path.join(self.model_path, "hf_quant_config.json"))
+
+    def _get_modelopt_quant_type(self) -> str:
+        """Extract ModelOpt quantization type from unified quantization flag."""
+        if self.quantization == "modelopt_fp8":
+            return "fp8"
+        elif self.quantization == "modelopt_fp4":
+            return "nvfp4"
+        elif self.quantization == "modelopt":
+            # Auto-detect from model config
+            quant_cfg = self._parse_quant_hf_config()
+            if quant_cfg:
+                quant_method = quant_cfg.get("quant_method", "").lower()
+                if "fp4" in quant_method:
+                    return "fp4"
+                elif "fp8" in quant_method:
+                    return "fp8"
+            # Default to fp8 if can't detect
+            return "fp8"
+        else:
+            return "fp8"  # Default fallback
+
+    def _validate_quantize_and_serve_config(self) -> None:
+        """Validate quantize-and-serve configuration and warn about conflicts."""
+        if not self.quantize_and_serve:
+            return
+
+        # Check for ModelOpt quantization requirement
+        if not (
+            self.modelopt_quant or self.quantization in ["modelopt_fp8", "modelopt_fp4"]
+        ):
+            raise ValueError(
+                "quantize_and_serve=True requires ModelOpt quantization. "
+                "Set --quantization to 'modelopt_fp8' or 'modelopt_fp4'"
+            )
+
+        # Quantize-and-serve mode is currently disabled due to compatibility issues
+        raise NotImplementedError(
+            "❌ Quantize-and-serve mode is currently disabled due to compatibility issues.\n\n"
+            "🔧 Please use the separate quantize-then-deploy workflow:\n"
+            "   1. Quantize: python examples/usage/modelopt_quantize_and_export.py quantize --model-path <model> --export-dir <output>\n"
+            "   2. Deploy: python -m sglang.launch_server --model-path <output> --quantization modelopt --disable-cuda-graph\n\n"
+            "ℹ️  This approach is more reliable and production-ready."
+        )
 
     # adapted from https://github.com/vllm-project/vllm/blob/v0.6.4.post1/vllm/config.py
     def _verify_quantization(self) -> None:
