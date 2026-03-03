@@ -6,14 +6,18 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config impor
     QuantizationConfig,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.fp8 import Fp8Config
+from sglang.multimodal_gen.runtime.layers.quantization.modelopt_fp8 import (
+    ModelOptFp8Config,
+)
 
-QuantizationMethods = Literal["fp8"]
+QuantizationMethods = Literal["fp8", "modelopt"]
 
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
 # The customized quantization methods which will be added to this dict.
 _CUSTOMIZED_METHOD_TO_QUANT_CONFIG = {
     "fp8": Fp8Config,
+    "modelopt": ModelOptFp8Config,
 }
 
 
