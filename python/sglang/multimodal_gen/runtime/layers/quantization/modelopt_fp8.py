@@ -38,10 +38,7 @@ from sglang.srt.layers.quantization.fp8_utils import (
     apply_fp8_linear,
     cutlass_fp8_supported,
 )
-from sglang.srt.layers.quantization.utils import (
-    convert_to_channelwise,
-    requantize_with_max_scale,
-)
+from sglang.srt.layers.quantization.utils import convert_to_channelwise
 
 logger = logging.getLogger(__name__)
 
@@ -173,23 +170,20 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
             layer.register_parameter(scale_name, scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if self.cutlass_fp8_supported:
-            weight_scale = convert_to_channelwise(
-                layer.weight_scale, layer.logical_widths
-            )
-        else:
-            weight_scale, weight = requantize_with_max_scale(
-                layer.weight, layer.weight_scale, layer.logical_widths
-            )
-            layer.weight = torch.nn.Parameter(weight.t(), requires_grad=False)
-            layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
-            layer.input_scale = torch.nn.Parameter(
-                layer.input_scale.max(), requires_grad=False
-            )
-            return
+        # Diffusion models use single-partition layers (no TP, no fused QKV),
+        # so we just take the max scale directly without the
+        # dequantize-requantize round-trip that the LLM path does (which
+        # requires CUDA kernels that are unavailable during CPU-phase loading).
+        max_w_scale = layer.weight_scale.max()
 
+        # Transpose weight to [in, out] column-major layout for
+        # apply_fp8_linear / CUTLASS fp8_scaled_mm.  Do NOT call
+        # .contiguous() — the kernel requires column-major stride.
         layer.weight = torch.nn.Parameter(layer.weight.data.t(), requires_grad=False)
-        layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
+
+        if self.cutlass_fp8_supported:
+            max_w_scale = convert_to_channelwise(max_w_scale, layer.logical_widths)
+        layer.weight_scale = torch.nn.Parameter(max_w_scale, requires_grad=False)
         layer.input_scale = torch.nn.Parameter(
             layer.input_scale.max(), requires_grad=False
         )

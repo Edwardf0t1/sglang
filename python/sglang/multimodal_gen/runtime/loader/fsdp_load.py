@@ -285,6 +285,25 @@ def load_model_from_full_model_state_dict(
         else:
             target_dtype = meta_sharded_param.dtype
 
+        # Auto-dequantize: checkpoint has FP8 weight but the model parameter
+        # is a higher-precision type (e.g. modules that don't accept
+        # quant_config like diffusers' AdaLayerNormZero).  Multiply by the
+        # per-tensor weight_scale so the loaded value matches the original
+        # unquantized weight.
+        if (
+            full_tensor.dtype == torch.float8_e4m3fn
+            and target_dtype != torch.float8_e4m3fn
+        ):
+            scale_key = target_param_name.rsplit(".", 1)[0] + ".weight_scale"
+            scale_tensor = custom_param_sd.get(scale_key)
+            if scale_tensor is not None:
+                full_tensor = full_tensor.to(torch.float32) * scale_tensor.float()
+                logger.debug(
+                    "Auto-dequantized FP8 weight %s using %s",
+                    target_param_name,
+                    scale_key,
+                )
+
         if not hasattr(meta_sharded_param, "device_mesh"):
             full_tensor = full_tensor.to(device=device, dtype=target_dtype)
             actual_param = param_dict.get(target_param_name)
